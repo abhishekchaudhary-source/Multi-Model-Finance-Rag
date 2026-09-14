@@ -1,0 +1,10 @@
+project-includes = [
+    "*.py",
+]
+project-excludes = [
+    "**/__pycache__/**",
+    "**/__pyrefly_virtual__/**",
+    "**/inmemory/**",
+    "Data/**",
+    ".system_generated/**"
+]

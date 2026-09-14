@@ -1,0 +1,15 @@
+streamlit
+google-genai
+qdrant-client
+langchain
+langchain-community
+langchain-qdrant
+sentence-transformers
+sqlalchemy
+psycopg2-binary
+python-dotenv
+pypdf
+pillow
+pandas
+numpy
+certifi

@@ -1,0 +1,4 @@
+{
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "problems.decorations.enabled": true
+}
