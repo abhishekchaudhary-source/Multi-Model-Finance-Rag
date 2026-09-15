@@ -157,13 +157,13 @@ STRICT RULES:
 5. If the provided context does not contain enough information to answer the question, state: "The provided SEC filings do not contain verified data for this specific metric."
 """
 
-    def __init__(self, min_retrieval_confidence: float = 0.08):
+    def __init__(self, min_confidence: float = 0.25):
         from retriever import FinancialMultiModalRerankRetriever
 
         self.retriever = FinancialMultiModalRerankRetriever()
-        self.min_confidence = min_retrieval_confidence
         self.guardrails = FinancialGuardrails()
         self.fallback = FallbackManager()
+        self.min_confidence = min_confidence
 
         self.gemini_client = None
         if GEMINI_API_KEY and GEMINI_AVAILABLE:
@@ -175,15 +175,48 @@ STRICT RULES:
 
     def answer_query(self, query: str, top_k: int = 3) -> Dict[str, Any]:
         """
-        Executes end-to-end RAG with Guardrails, Groundedness, and Fallbacks.
+        Executes end-to-end RAG with Intent Classification, Guardrails, Groundedness, and Fallbacks.
         """
         # ==========================================
-        # STEP 1: INPUT GUARDRAIL CHECK
+        # STEP 1: INTENT CLASSIFICATION & ROUTING
+        # ==========================================
+        intent_info = FinancialIntentClassifier.classify(query)
+
+        # 1A. Fast-Path: Greeting / About Chitchat
+        if intent_info["intent"] == "GREETING_CHITCHAT":
+            return {
+                "answer": get_conversational_greeting(),
+                "intent": intent_info,
+                "guardrail_status": {"passed": True, "note": "Greeting / Capability Overview"},
+                "groundedness": {"passed": True, "groundedness_score": 1.0, "status": "Direct Response"},
+                "fallback_triggered": False,
+                "fallback_type": None,
+                "sources": []
+            }
+
+        # 1B. Fast-Path: Out-of-Scope Detection (e.g. Tesla, Netflix)
+        if intent_info["intent"] == "OUT_OF_SCOPE":
+            fallback_answer = self.guardrails.validate_and_format_output(
+                self.fallback.out_of_scope_fallback(query)
+            )
+            return {
+                "answer": fallback_answer,
+                "intent": intent_info,
+                "guardrail_status": {"passed": True, "note": intent_info["explanation"]},
+                "groundedness": {"passed": True, "groundedness_score": 1.0, "status": "Clean Fallback"},
+                "fallback_triggered": True,
+                "fallback_type": "OUT_OF_SCOPE_INTENT",
+                "sources": []
+            }
+
+        # ==========================================
+        # STEP 2: INPUT GUARDRAIL CHECK
         # ==========================================
         input_check = self.guardrails.validate_input(query)
         if not input_check["passed"]:
             return {
                 "answer": f"🛡️ **Guardrail Triggered:** {input_check['reason']}",
+                "intent": intent_info,
                 "guardrail_status": input_check,
                 "groundedness": {"passed": False, "groundedness_score": 0.0},
                 "fallback_triggered": True,
@@ -192,9 +225,14 @@ STRICT RULES:
             }
 
         # ==========================================
-        # STEP 2: RETRIEVAL & RE-RANKING (BGE-v2-m3)
+        # STEP 3: RETRIEVAL & RE-RANKING (BGE-v2-m3)
         # ==========================================
-        retrieved_chunks = self.retriever.retrieve_and_rerank(query=query, top_k=top_k)
+        content_type = intent_info.get("content_type")
+        retrieved_chunks = self.retriever.retrieve_and_rerank(
+            query=query, 
+            top_k=top_k,
+            content_type=content_type
+        )
 
         # TIER 1 FALLBACK: Out-of-Scope / Low Confidence
         if not retrieved_chunks or retrieved_chunks[0]["rerank_score"] < self.min_confidence:
@@ -203,6 +241,7 @@ STRICT RULES:
             )
             return {
                 "answer": fallback_answer,
+                "intent": intent_info,
                 "guardrail_status": {"passed": True, "input_check": input_check},
                 "groundedness": {"passed": True, "groundedness_score": 1.0, "status": "Clean Fallback"},
                 "fallback_triggered": True,
@@ -304,6 +343,7 @@ STRICT RULES:
 
         return {
             "answer": final_answer,
+            "intent": intent_info,
             "guardrail_status": {"passed": True, "input_check": input_check, "groundedness": groundedness_result},
             "groundedness": groundedness_result,
             "fallback_triggered": False,

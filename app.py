@@ -22,6 +22,7 @@ from database import (
     get_recent_audit_logs,
     get_analytics_summary
 )
+from intent_classifier import FinancialIntentClassifier, get_conversational_greeting
 
 load_dotenv()
 
@@ -635,7 +636,8 @@ with st.sidebar:
             if logs:
                 st.markdown("<div style='font-size:11px; font-weight:600; margin-top:8px;'>Recent Logged Audits:</div>", unsafe_allow_html=True)
                 for l in logs:
-                    st.caption(f"• `{l['timestamp'][-8:]}` | **{l['company']}** | Faith: `{l['faithfulness']}` | Lat: `{l['latency']}`")
+                    intent_tag = f"• {l.get('intent', 'QUERY')[:12]}" if l.get('intent') else ""
+                    st.caption(f"• `{l['timestamp'][-8:]}` | **{l['company']}** | {intent_tag} | Faith: `{l['faithfulness']}`")
         else:
             st.warning("PostgreSQL connection offline. Connect to localhost:5432 to enable persistence.")
 
@@ -707,6 +709,17 @@ for msg in st.session_state.messages:
             <span style="font-size: 14px; font-weight: 600; color: var(--app-text);">Gemini</span>
         </div>
         """, unsafe_allow_html=True)
+
+        # Display Intent Badge if saved in message state
+        if msg.get("intent_data"):
+            idata = msg["intent_data"]
+            badge_html = f"""<div style="margin-bottom: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <span style="background: {idata['badge_color']}18; color: {idata['badge_color']}; padding: 3px 10px; border-radius: 12px; font-size: 0.78rem; font-weight: 600; border: 1px solid {idata['badge_color']}40;">
+                    {idata['badge_label']}
+                </span>
+                <span style="color: #80868B; font-size: 0.75rem;">Confidence: {int(idata['confidence']*100)}%</span>
+            </div>"""
+            st.markdown(badge_html, unsafe_allow_html=True)
 
         st.markdown(clean_answer_text(msg["content"]))
 
@@ -784,7 +797,13 @@ if st.session_state.get("pending_query"):
             "content": sec_msg,
             "sources": [],
             "chart_images": [],
-            "metrics": None
+            "metrics": None,
+            "intent_data": {
+                "intent": "GUARDRAIL_BLOCKED",
+                "badge_label": "🛡️ Guardrail Blocked",
+                "badge_color": "#EA4335",
+                "confidence": 1.0
+            }
         })
         # Persist guardrail block to PostgreSQL
         save_chat_message(role="assistant", content=sec_msg, session_id=st.session_state.session_id)
@@ -794,39 +813,73 @@ if st.session_state.get("pending_query"):
             metrics=None,
             sources=[],
             session_id=st.session_state.session_id,
-            is_fallback=True
+            is_fallback=True,
+            intent="GUARDRAIL_BLOCKED"
         )
     else:
-        # 2. Retrieval & Generation with status spinner (Question is already visible at the top!)
-        with st.spinner("Analyzing SEC filings with Gemini 2.0 Flash..."):
-            chunks = retriever.retrieve_and_rerank(
-                query=cleaned_query,
-                dense_top_k=int(os.getenv("DENSE_TOP_K", 12)),
-                sparse_top_k=int(os.getenv("SPARSE_TOP_K", 12)),
-                hybrid_top_k=int(os.getenv("HYBRID_TOP_K", 12)),
-                top_k=int(os.getenv("RERANK_TOP_K", 3)),
-                min_rerank_score=0.20
-            )
+        # 2. Intent Classification & Routing
+        intent_data = FinancialIntentClassifier.classify(cleaned_query)
+        intent_type = intent_data["intent"]
 
-            # 3. Answer Generation
-            if not chunks:
-                answer_text = fallback.out_of_scope_fallback(cleaned_query)
-                chart_imgs = []
-            else:
-                gen_result = generator.generate(cleaned_query, chunks)
-                answer_text = clean_answer_text(gen_result["answer"])
-                chart_imgs = []
-                for c in chunks:
-                    if c.get("image_path") and os.path.exists(c["image_path"]):
-                        chart_imgs.append({
-                            "path": c["image_path"],
-                            "title": f"{c['company']} {c.get('year', '')} Visual Evidence",
-                            "filename": c.get("filename", ""),
-                            "page": c.get("page", ""),
-                            "score": c.get("rerank_score", "")
-                        })
+        # Render Visual Intent Badge
+        entity_info = ""
+        if intent_data.get("companies") and len(intent_data["companies"]) > 1:
+            entity_info = f" • Entities: <b>{', '.join(intent_data['companies'])}</b>"
+        elif intent_data.get("company"):
+            entity_info = f" • Entity: <b>{intent_data['company']}</b>"
 
-        # 4. Stream Answer Word-by-Word (Typewriter effect: word by word visible typing)
+        badge_html = f"""<div style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="background: {intent_data['badge_color']}18; color: {intent_data['badge_color']}; padding: 3px 10px; border-radius: 12px; font-size: 0.78rem; font-weight: 600; border: 1px solid {intent_data['badge_color']}40;">
+                {intent_data['badge_label']}
+            </span>
+            <span style="color: #80868B; font-size: 0.75rem;">Confidence: {int(intent_data['confidence']*100)}%</span>
+            <span style="color: #80868B; font-size: 0.75rem;">{entity_info}</span>
+        </div>"""
+        st.markdown(badge_html, unsafe_allow_html=True)
+
+        # 3. Intent-Specific Execution Routing
+        if intent_type == "GREETING_CHITCHAT":
+            answer_text = get_conversational_greeting()
+            chunks = []
+            chart_imgs = []
+        elif intent_type == "OUT_OF_SCOPE":
+            answer_text = fallback.out_of_scope_fallback(cleaned_query)
+            chunks = []
+            chart_imgs = []
+        else:
+            with st.spinner("Analyzing SEC filings with Gemini 2.0 Flash..."):
+                retrieve_kwargs = {
+                    "query": cleaned_query,
+                    "dense_top_k": int(os.getenv("DENSE_TOP_K", 12)),
+                    "sparse_top_k": int(os.getenv("SPARSE_TOP_K", 12)),
+                    "hybrid_top_k": int(os.getenv("HYBRID_TOP_K", 12)),
+                    "top_k": int(os.getenv("RERANK_TOP_K", 3)),
+                    "min_rerank_score": 0.20
+                }
+                if intent_type == "VISUAL_CHART_REQUEST":
+                    retrieve_kwargs["content_type"] = "chart"
+
+                chunks = retriever.retrieve_and_rerank(**retrieve_kwargs)
+
+                # Answer Generation
+                if not chunks:
+                    answer_text = fallback.out_of_scope_fallback(cleaned_query)
+                    chart_imgs = []
+                else:
+                    gen_result = generator.generate(cleaned_query, chunks)
+                    answer_text = clean_answer_text(gen_result["answer"])
+                    chart_imgs = []
+                    for c in chunks:
+                        if c.get("image_path") and os.path.exists(c["image_path"]):
+                            chart_imgs.append({
+                                "path": c["image_path"],
+                                "title": f"{c['company']} {c.get('year', '')} Visual Evidence",
+                                "filename": c.get("filename", ""),
+                                "page": c.get("page", ""),
+                                "score": c.get("rerank_score", "")
+                            })
+
+        # 4. Stream Answer Word-by-Word (Typewriter effect)
         def stream_word_by_word(text: str):
             parts = re.split(r'( +|\n+)', text)
             for part in parts:
@@ -884,13 +937,14 @@ if st.session_state.get("pending_query"):
                 st.metric(label="💰 Cost Per Query", value=metrics_eval["cost"]["formatted_cost"])
                 st.caption(f"Tokens: {metrics_eval['cost']['total_tokens']} | Latency: {metrics_eval['latency_seconds']:.2f}s")
 
-        # 8. Save completed response to messages history (ONLY active user and assistant messages)
+        # 8. Save completed response to messages history
         st.session_state.messages.append({
             "role": "assistant",
             "content": answer_text,
             "sources": chunks,
             "chart_images": chart_imgs,
-            "metrics": metrics_eval
+            "metrics": metrics_eval,
+            "intent_data": intent_data
         })
 
         # 9. Persist message and audit telemetry to PostgreSQL
@@ -898,7 +952,7 @@ if st.session_state.get("pending_query"):
             role="assistant",
             content=answer_text,
             session_id=st.session_state.session_id,
-            metadata={"quality": metrics_eval.get("quality_percentage"), "num_sources": len(chunks)}
+            metadata={"quality": metrics_eval.get("quality_percentage"), "num_sources": len(chunks), "intent": intent_type}
         )
         log_query_audit(
             query=cleaned_query,
@@ -906,7 +960,8 @@ if st.session_state.get("pending_query"):
             metrics=metrics_eval,
             sources=chunks,
             session_id=st.session_state.session_id,
-            is_fallback=is_fb
+            is_fallback=is_fb,
+            intent=intent_type
         )
 
 

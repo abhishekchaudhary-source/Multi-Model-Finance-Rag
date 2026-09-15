@@ -45,6 +45,7 @@ class RAGAuditLog(Base):
     latency_seconds = Column(Float, default=0.0)
     is_fallback = Column(Boolean, default=False)
     top_source = Column(String(255), nullable=True)
+    intent = Column(String(64), nullable=True)
 
 
 class ChatMessageRecord(Base):
@@ -118,7 +119,8 @@ def log_query_audit(
     metrics: Optional[Dict[str, Any]] = None,
     sources: Optional[List[Dict[str, Any]]] = None,
     session_id: str = "default-session",
-    is_fallback: bool = False
+    is_fallback: bool = False,
+    intent: Optional[str] = None
 ) -> Optional[int]:
     """
     Inserts a comprehensive telemetry and evaluation record into rag_audit_logs.
@@ -156,7 +158,8 @@ def log_query_audit(
             cost_usd=cost_val,
             latency_seconds=latency_val,
             is_fallback=is_fallback,
-            top_source=top_src
+            top_source=top_src,
+            intent=intent
         )
         session.add(record)
         session.commit()
@@ -260,7 +263,8 @@ def get_recent_audit_logs(limit: int = 15) -> List[Dict[str, Any]]:
                 "relevance": f"{r.relevance_score * 100:.1f}%",
                 "latency": f"{r.latency_seconds:.2f}s",
                 "cost": f"${r.cost_usd:.5f}",
-                "fallback": "Yes" if r.is_fallback else "No"
+                "fallback": "Yes" if r.is_fallback else "No",
+                "intent": r.intent or "FINANCIAL_NUMERICAL"
             }
             for r in records
         ]

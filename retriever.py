@@ -81,47 +81,10 @@ class FinancialMultiModalRerankRetriever:
         "Spotify", "Oracle", "Walmart", "Disney", "OpenAI"
     ]
 
-    def parse_query_intent(self, user_query: str) -> Dict[str, Optional[str]]:
-        """Extracts company, year, quarter, and modality hints from the user query."""
-        extracted = {
-            "company": None,
-            "year": None,
-            "quarter": None,
-            "content_type": None,
-            "unindexed_company": None
-        }
-
-        # Detect Supported Company
-        for comp in self.COMPANIES:
-            if re.search(r'\b' + comp + r'\b', user_query, re.IGNORECASE):
-                extracted["company"] = comp
-                break
-
-        # Detect Unindexed Company (e.g. Uber, Tesla, Netflix)
-        if not extracted["company"]:
-            for un_comp in self.UNINDEXED_COMPANIES:
-                if re.search(r'\b' + un_comp + r'\b', user_query, re.IGNORECASE):
-                    extracted["unindexed_company"] = un_comp
-                    break
-
-        # Detect Year
-        year_match = re.search(r'\b(20\d\d)\b', user_query)
-        if year_match:
-            extracted["year"] = year_match.group(1)
-
-        # Detect Quarter
-        quarter_match = re.search(r'\b(q[1-4])\b', user_query, re.IGNORECASE)
-        if quarter_match:
-            extracted["quarter"] = quarter_match.group(1).upper()
-
-        # Detect Modality hint
-        query_lower = user_query.lower()
-        if any(term in query_lower for term in ["chart", "graph", "diagram", "visual", "trend", "plot"]):
-            extracted["content_type"] = "chart"
-        elif any(term in query_lower for term in ["table", "balance sheet", "income statement", "breakdown", "revenue by"]):
-            extracted["content_type"] = "table"
-
-        return extracted
+    def parse_query_intent(self, user_query: str) -> Dict[str, Any]:
+        """Extracts company, year, quarter, modality, and classified intent from user query."""
+        from intent_classifier import FinancialIntentClassifier
+        return FinancialIntentClassifier.classify(user_query)
 
     def retrieve_and_rerank(
         self,
@@ -150,9 +113,12 @@ class FinancialMultiModalRerankRetriever:
         hybrid_limit = hybrid_top_k or initial_candidates or int(os.getenv("HYBRID_TOP_K", 12))
         final_top_k = top_k if top_k is not None else int(os.getenv("RERANK_TOP_K", 3))
 
+        detected = None
         if apply_auto_filter:
             detected = self.parse_query_intent(query)
-            # If an external unindexed company was asked for, don't return false positives
+            # Fast exit for greetings or unindexed companies
+            if detected.get("intent") == "GREETING_CHITCHAT":
+                return []
             if detected.get("unindexed_company") and not company:
                 return []
 
@@ -163,8 +129,12 @@ class FinancialMultiModalRerankRetriever:
 
         # --- STAGE 1: HYBRID RETRIEVAL ---
         must_conditions = []
-        if company:
+        companies = detected.get("companies") if detected else []
+        if len(companies) > 1 and not company:
+            must_conditions.append(models.FieldCondition(key="metadata.company", match=models.MatchAny(any=companies)))
+        elif company:
             must_conditions.append(models.FieldCondition(key="metadata.company", match=models.MatchValue(value=company)))
+
         if content_type:
             must_conditions.append(models.FieldCondition(key="metadata.content_type", match=models.MatchValue(value=content_type)))
         if year:
