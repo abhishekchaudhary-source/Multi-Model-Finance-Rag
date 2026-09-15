@@ -279,6 +279,7 @@ def serve_testing_dashboard():
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         :root {
             --bg-body: #0d1117;
@@ -612,14 +613,32 @@ def serve_testing_dashboard():
             background: var(--bg-body);
             border: 1px solid var(--border);
             border-radius: 8px;
-            padding: 16px;
+            padding: 18px;
             font-size: 0.95rem;
-            white-space: pre-wrap;
             min-height: 120px;
-            max-height: 420px;
+            max-height: 480px;
             overflow-y: auto;
             position: relative;
+            line-height: 1.6;
         }
+
+        .answer-box h1, .answer-box h2, .answer-box h3 {
+            margin-top: 14px;
+            margin-bottom: 8px;
+            color: #f0f6fc;
+            font-weight: 600;
+        }
+
+        .answer-box h3 { font-size: 1.05rem; }
+        .answer-box p { margin-bottom: 10px; }
+        .answer-box ul, .answer-box ol { margin-left: 22px; margin-bottom: 10px; }
+        .answer-box li { margin-bottom: 4px; }
+        .answer-box strong { color: #58a6ff; font-weight: 600; }
+        .answer-box hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+        .answer-box blockquote { border-left: 3px solid var(--primary); padding-left: 12px; color: var(--text-muted); margin: 8px 0; }
+        .answer-box table { margin: 12px 0; width: 100%; border-collapse: collapse; }
+        .answer-box th, .answer-box td { border: 1px solid var(--border); padding: 8px 12px; }
+        .answer-box th { background: var(--bg-card); color: var(--text); }
 
         /* Metrics Card */
         .metrics-grid {
@@ -1013,8 +1032,12 @@ def serve_testing_dashboard():
                     document.getElementById('intent-entity-text').innerText = `Entities: ${entities}`;
                 }
 
-                // Render Answer
-                answerBox.innerText = data.answer;
+                // Render Answer with rich Markdown
+                if (window.marked && window.marked.parse) {
+                    answerBox.innerHTML = marked.parse(data.answer);
+                } else {
+                    answerBox.innerText = data.answer;
+                }
 
                 // Render Charts if attached
                 if (data.charts && data.charts.length > 0) {
