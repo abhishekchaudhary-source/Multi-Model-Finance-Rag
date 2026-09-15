@@ -26,7 +26,7 @@ class GeminiFinancialGenerator:
     - Graceful Fallback: Seamlessly falls back to direct filing evidence if API key is not set or network fails.
     """
 
-    MODEL_NAME = os.getenv("LLM_MODEL", "gemini-2.0-flash")
+    MODEL_NAME = os.getenv("LLM_MODEL", "gemini-3.6-flash")
 
     SYSTEM_INSTRUCTION = """You are a senior financial analyst specialized in SEC regulatory filings (10-K, 10-Q, 8-K) for Apple, Amazon, Google, and Meta.
 
