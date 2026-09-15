@@ -601,6 +601,19 @@ with st.sidebar:
             st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
             st.rerun()
 
+    # LLM Engine Selector (Gemini vs Mistral)
+    st.markdown("<div style='font-size:11px; font-weight:600; color:var(--sidebar-title); margin-top:14px; margin-bottom:4px;'>🤖 LLM ENGINE:</div>", unsafe_allow_html=True)
+    provider_options = ["Google Gemini (3.6 Flash)", "Mistral AI (Pixtral 12B Vision)"]
+    default_provider_idx = 0 if os.getenv("LLM_PROVIDER", "gemini").lower() == "gemini" else 1
+    selected_llm_label = st.selectbox(
+        "LLM Provider",
+        provider_options,
+        index=default_provider_idx,
+        key="llm_provider_choice",
+        label_visibility="collapsed"
+    )
+    current_provider = "mistral" if "Mistral" in selected_llm_label else "gemini"
+
     # Sidebar Navigation (Search Chats)
     st.markdown("""
     <div style="margin-top: 10px;">
@@ -659,11 +672,12 @@ with st.sidebar:
 # --- MAIN CHAT AREA ---
 col_head_left, col_head_right = st.columns([3, 1])
 with col_head_left:
-    llm_display = os.getenv("LLM_MODEL", "gemini-2.0-flash").replace("-", " ").title()
+    active_model_name = "Mistral Pixtral 12B" if current_provider == "mistral" else "Gemini 3.6 Flash"
+    badge_color = "#FF7000" if current_provider == "mistral" else "#4285F4"
     st.markdown(f"""
     <div class="model-header-pill">
-        <span style="color: #4285F4;">●</span>
-        <span>{llm_display}</span>
+        <span style="color: {badge_color};">●</span>
+        <span>{active_model_name}</span>
         <span style="font-size: 10px; opacity: 0.7; margin-left: 4px;">SEC Multi-Modal RAG</span>
     </div>
     """, unsafe_allow_html=True)
@@ -866,7 +880,7 @@ if st.session_state.get("pending_query"):
                     answer_text = fallback.out_of_scope_fallback(cleaned_query)
                     chart_imgs = []
                 else:
-                    gen_result = generator.generate(cleaned_query, chunks)
+                    gen_result = generator.generate(cleaned_query, chunks, provider=current_provider)
                     answer_text = clean_answer_text(gen_result["answer"])
                     chart_imgs = []
                     for c in chunks:

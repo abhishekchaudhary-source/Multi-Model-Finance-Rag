@@ -74,6 +74,7 @@ class ClassifyRequest(BaseModel):
 class QueryRequest(BaseModel):
     query: str = Field(..., example="What was Apple's iPhone net sales in Q2 2024?")
     top_k: Optional[int] = Field(default=3, ge=1, le=10)
+    provider: Optional[str] = Field(default="gemini", description="LLM provider: 'gemini' or 'mistral'")
     session_id: Optional[str] = Field(default="fastapi-tester")
 
 
@@ -187,7 +188,7 @@ def execute_query(req: QueryRequest):
             answer_text = fallback.out_of_scope_fallback(cleaned_query)
             chart_imgs = []
         else:
-            gen_result = generator.generate(cleaned_query, chunks)
+            gen_result = generator.generate(cleaned_query, chunks, provider=req.provider)
             answer_text = gen_result["answer"]
             chart_imgs = []
             for c in chunks:
@@ -768,13 +769,22 @@ def serve_testing_dashboard():
                     <div class="query-input-box">
                         <textarea id="query-input" placeholder="Ask SEC financial question (e.g., Apple iPhone sales, AWS cloud revenue, charts)..."></textarea>
                         <div class="action-row">
-                            <div style="display: flex; align-items: center; gap: 8px;">
-                                <label style="font-size: 0.8rem; color: var(--text-muted);">Top-K Chunks:</label>
-                                <select id="topk-select" style="background: var(--bg-card); color: var(--text); border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; font-family: inherit;">
-                                    <option value="3" selected>3</option>
-                                    <option value="5">5</option>
-                                    <option value="8">8</option>
-                                </select>
+                            <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                                <div style="display: flex; align-items: center; gap: 6px;">
+                                    <label style="font-size: 0.8rem; color: var(--text-muted);">LLM Engine:</label>
+                                    <select id="provider-select" style="background: var(--bg-card); color: var(--text); border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; font-family: inherit;">
+                                        <option value="gemini" selected>Google Gemini 3.6 Flash</option>
+                                        <option value="mistral">Mistral AI (Pixtral 12B Vision)</option>
+                                    </select>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 6px;">
+                                    <label style="font-size: 0.8rem; color: var(--text-muted);">Top-K:</label>
+                                    <select id="topk-select" style="background: var(--bg-card); color: var(--text); border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; font-family: inherit;">
+                                        <option value="3" selected>3</option>
+                                        <option value="5">5</option>
+                                        <option value="8">8</option>
+                                    </select>
+                                </div>
                             </div>
                             <button class="btn-primary" id="run-query-btn" onclick="runRAGQuery()">
                                 <span id="run-btn-text">Execute RAG</span>
@@ -956,6 +966,7 @@ def serve_testing_dashboard():
             }
 
             const topK = parseInt(document.getElementById('topk-select').value) || 3;
+            const provider = document.getElementById('provider-select').value || 'gemini';
             const runBtn = document.getElementById('run-query-btn');
             const runText = document.getElementById('run-btn-text');
             const timingBadge = document.getElementById('timing-badge');
@@ -966,7 +977,7 @@ def serve_testing_dashboard():
             runBtn.disabled = true;
             runText.innerHTML = '<span class="spinner"></span> Running...';
             timingBadge.innerText = 'Analyzing...';
-            answerBox.innerText = '⚡ Retrieving SEC chunks from Qdrant Cloud and generating grounded answer with Gemini 2.0 Flash...';
+            answerBox.innerText = `⚡ Retrieving SEC chunks from Qdrant Cloud and generating with ${provider.toUpperCase()}...`;
 
             const startTime = performance.now();
 
@@ -974,7 +985,7 @@ def serve_testing_dashboard():
                 const resp = await fetch('/api/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query: query, top_k: topK })
+                    body: JSON.stringify({ query: query, top_k: topK, provider: provider })
                 });
 
                 if (!resp.ok) {

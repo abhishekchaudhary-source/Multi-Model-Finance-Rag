@@ -1,12 +1,13 @@
 import os
+import base64
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from PIL import Image
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("LLM_API_KEY")
-
+# 1. Google Gemini Setup
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 try:
     from google import genai
     from google.genai import types
@@ -14,19 +15,39 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
+# 2. Mistral AI Setup
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+try:
+    from mistralai.client import Mistral
+    MISTRAL_AVAILABLE = True
+except ImportError:
+    MISTRAL_AVAILABLE = False
+
 from rag_engine import FinancialGuardrails, FallbackManager
 
 
-class GeminiFinancialGenerator:
+def encode_image_base64(image_path: str) -> str:
+    """Encodes a local image file to base64 string for Mistral vision input."""
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
+
+
+class UniversalFinancialGenerator:
     """
-    Generation Layer powered by Google Gemini 2.0 Flash:
-    - Multi-Modal Input: Simultaneously accepts user queries, Markdown financial tables, and chart images.
-    - Zero-Hallucination System Prompt: Enforces strict adherence to filing facts and numerical precision.
-    - Fact-Checking Guardrail: Runs Groundedness validation on the generated answer.
-    - Graceful Fallback: Seamlessly falls back to direct filing evidence if API key is not set or network fails.
+    Multi-Provider Generation Layer supporting:
+    - 🔵 Google Gemini (gemini-3.6-flash / gemini-2.0-flash)
+    - 🟠 Mistral AI (pixtral-12b-2409 / mistral-large-latest)
+    
+    Features:
+    - Multi-Modal Input: Handles user query, financial markdown tables, and chart images.
+    - Zero-Hallucination System Prompt: Strict adherence to SEC filing facts.
+    - Groundedness Guardrail: Validates all numerical entities against retrieved chunks.
+    - Graceful Fallback: Falls back to direct filing extract if API key is not configured or network fails.
     """
 
-    MODEL_NAME = os.getenv("LLM_MODEL", "gemini-3.6-flash")
+    DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+    GEMINI_MODEL = os.getenv("LLM_MODEL", "gemini-3.6-flash")
+    MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "pixtral-12b-2409")
 
     SYSTEM_INSTRUCTION = """You are a senior financial analyst specialized in SEC regulatory filings (10-K, 10-Q, 8-K) for Apple, Amazon, Google, and Meta.
 
@@ -41,31 +62,45 @@ STRICT OPERATING PRINCIPLES:
     def __init__(self):
         self.guardrails = FinancialGuardrails()
         self.fallback = FallbackManager()
-        self.client = None
+        self.gemini_client = None
+        self.mistral_client = None
 
-        gemini_url = os.getenv("GEMINI_API_URL") or os.getenv("LLM_API_URL")
+        # Connect Google Gemini
         if GEMINI_API_KEY and GEMINI_AVAILABLE:
             try:
+                gemini_url = os.getenv("GEMINI_API_URL")
                 if gemini_url and "generativelanguage.googleapis.com" not in gemini_url:
-                    self.client = genai.Client(api_key=GEMINI_API_KEY, http_options={"base_url": gemini_url})
+                    self.gemini_client = genai.Client(api_key=GEMINI_API_KEY, http_options={"base_url": gemini_url})
                 else:
-                    self.client = genai.Client(api_key=GEMINI_API_KEY)
-                print(f"✨ Connected to Google Gemini ({self.MODEL_NAME}) Generation Layer!")
+                    self.gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+                print(f"✨ Connected to Google Gemini ({self.GEMINI_MODEL}) Generation Layer!")
             except Exception as e:
                 print(f"⚠️ Failed to connect to Gemini API: {e}")
-        else:
-            print("ℹ️ Note: GEMINI_API_KEY not found in .env. Running in Direct-Evidence Fallback Mode.")
+
+        # Connect Mistral AI
+        mistral_key = os.getenv("MISTRAL_API_KEY")
+        if mistral_key and MISTRAL_AVAILABLE:
+            try:
+                self.mistral_client = Mistral(api_key=mistral_key)
+                print(f"🟠 Connected to Mistral AI ({self.MISTRAL_MODEL}) Generation Layer!")
+            except Exception as e:
+                print(f"⚠️ Failed to connect to Mistral API: {e}")
+        elif not mistral_key:
+            print("ℹ️ Note: MISTRAL_API_KEY not set in .env. Mistral ready on demand once key is provided.")
 
     def generate(
         self,
         query: str,
         retrieved_chunks: List[Dict[str, Any]],
+        provider: Optional[str] = None,
         temperature: float = 0.0,
         max_tokens: int = 1200
     ) -> Dict[str, Any]:
         """
-        Generates a cited, verified financial answer using Gemini 2.0 Flash.
+        Generates a cited, verified financial answer using either Gemini or Mistral AI.
         """
+        active_provider = (provider or self.DEFAULT_PROVIDER).lower()
+
         if not retrieved_chunks:
             fallback_text = self.fallback.out_of_scope_fallback(query)
             return {
@@ -81,19 +116,7 @@ STRICT OPERATING PRINCIPLES:
             meta_snippet = f"{c.get('company', '')} {c.get('filename', '')} page {c.get('page', '')} {c.get('year', '')} {c.get('quarter', '')} {c.get('doc_type', '')}"
             source_texts.append(f"{meta_snippet} {c.get('content', '')}")
 
-        # Check if Gemini API is available
-        if not self.client:
-            evidence = self.fallback.direct_evidence_fallback(query, retrieved_chunks)
-            return {
-                "answer": self.guardrails.validate_and_format_output(evidence),
-                "model": "direct-evidence-fallback",
-                "groundedness": {"passed": True, "score": 1.0, "status": "Direct SEC Evidence"},
-                "fallback_triggered": True,
-                "fallback_type": "DIRECT_EVIDENCE_FALLBACK",
-                "sources": retrieved_chunks
-            }
-
-        # 1. Assemble Context for Gemini
+        # Assemble Structured Context
         context_blocks = []
         for idx, chunk in enumerate(retrieved_chunks, 1):
             header = f"=== DOCUMENT {idx} [{chunk['modality']}] ==="
@@ -101,61 +124,145 @@ STRICT OPERATING PRINCIPLES:
             context_blocks.append(f"{header}\n{source_meta}\n\n{chunk['content']}")
 
         full_context_text = "\n\n".join(context_blocks)
-
-        prompt = (
+        prompt_text = (
             f"### CONTEXT EXTRACTED FROM OFFICIAL SEC FILINGS:\n\n"
             f"{full_context_text}\n\n"
             f"### USER QUERY:\n{query}\n\n"
             f"### YOUR DETAILED & CITED FINANCIAL ANALYSIS:"
         )
 
-        # Prepare Multi-Modal Contents list
-        contents = [prompt]
-
-        # Attach chart images if present in top results
+        raw_answer = None
+        used_model = None
         images_attached = 0
-        for chunk in retrieved_chunks:
-            img_path = chunk.get("image_path")
-            if img_path and os.path.exists(img_path):
+
+        # ==========================================
+        # ROUTE 1: MISTRAL AI (PIXTRAL / LARGE)
+        # ==========================================
+        if active_provider == "mistral":
+            if not self.mistral_client:
+                # If Mistral key is not set, try falling back to Gemini if available
+                if self.gemini_client:
+                    print("⚠️ Mistral client not configured. Auto-routing to Google Gemini...")
+                    active_provider = "gemini"
+                else:
+                    evidence = self.fallback.direct_evidence_fallback(query, retrieved_chunks)
+                    return {
+                        "answer": self.guardrails.validate_and_format_output(
+                            "💡 **Mistral API Key Required:** Please add `MISTRAL_API_KEY` to your `.env` file to use Mistral AI.\n\n" + evidence
+                        ),
+                        "model": "mistral-key-missing-fallback",
+                        "groundedness": {"passed": True, "score": 1.0},
+                        "fallback_triggered": True,
+                        "fallback_type": "MISTRAL_KEY_MISSING",
+                        "sources": retrieved_chunks
+                    }
+
+            if active_provider == "mistral":
                 try:
-                    img = Image.open(img_path)
-                    contents.append(img)
-                    images_attached += 1
+                    user_content = [{"type": "text", "text": prompt_text}]
+
+                    # Attach images for Pixtral multi-modal vision
+                    for chunk in retrieved_chunks:
+                        img_path = chunk.get("image_path")
+                        if img_path and os.path.exists(img_path):
+                            try:
+                                b64 = encode_image_base64(img_path)
+                                user_content.append({
+                                    "type": "image_url",
+                                    "image_url": f"data:image/jpeg;base64,{b64}"
+                                })
+                                images_attached += 1
+                            except Exception as e:
+                                print(f"⚠️ Error encoding chart image for Mistral: {e}")
+
+                    messages = [
+                        {"role": "system", "content": self.SYSTEM_INSTRUCTION},
+                        {"role": "user", "content": user_content if images_attached > 0 else prompt_text}
+                    ]
+
+                    response = self.mistral_client.chat.complete(
+                        model=self.MISTRAL_MODEL,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    )
+                    raw_answer = response.choices[0].message.content
+                    used_model = f"mistral/{self.MISTRAL_MODEL}"
                 except Exception as e:
-                    print(f"⚠️ Warning loading chart image ({img_path}): {e}")
+                    print(f"⚠️ Mistral API call failed: {e}")
+                    # Try falling back to Gemini
+                    if self.gemini_client:
+                        print("Auto-falling back to Gemini...")
+                        active_provider = "gemini"
+                    else:
+                        evidence = self.fallback.direct_evidence_fallback(query, retrieved_chunks)
+                        return {
+                            "answer": self.guardrails.validate_and_format_output(
+                                f"⚠️ Mistral API Error ({e}). Falling back to direct filing extract:\n\n" + evidence
+                            ),
+                            "model": "mistral-api-fallback",
+                            "groundedness": {"passed": True, "score": 1.0},
+                            "fallback_triggered": True,
+                            "fallback_type": "MISTRAL_API_ERROR",
+                            "sources": retrieved_chunks
+                        }
 
-        # 2. Call Gemini 2.0 Flash
-        try:
-            config = types.GenerateContentConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                system_instruction=self.SYSTEM_INSTRUCTION
-            )
+        # ==========================================
+        # ROUTE 2: GOOGLE GEMINI
+        # ==========================================
+        if active_provider == "gemini":
+            if not self.gemini_client:
+                evidence = self.fallback.direct_evidence_fallback(query, retrieved_chunks)
+                return {
+                    "answer": self.guardrails.validate_and_format_output(evidence),
+                    "model": "direct-evidence-fallback",
+                    "groundedness": {"passed": True, "score": 1.0},
+                    "fallback_triggered": True,
+                    "fallback_type": "DIRECT_EVIDENCE_FALLBACK",
+                    "sources": retrieved_chunks
+                }
 
-            response = self.client.models.generate_content(
-                model=self.MODEL_NAME,
-                contents=contents,
-                config=config
-            )
-            raw_answer = response.text
-        except Exception as e:
-            # Fallback Tier 3: API Failure Fallback
-            evidence = self.fallback.direct_evidence_fallback(query, retrieved_chunks)
-            err_msg = f"⚠️ Gemini API Call Failed ({e}). Falling back to direct filing extract:\n\n" + evidence
-            return {
-                "answer": self.guardrails.validate_and_format_output(err_msg),
-                "model": "api-error-fallback",
-                "groundedness": {"passed": True, "score": 1.0},
-                "fallback_triggered": True,
-                "fallback_type": "API_ERROR_FALLBACK",
-                "sources": retrieved_chunks
-            }
+            try:
+                contents = [prompt_text]
+                for chunk in retrieved_chunks:
+                    img_path = chunk.get("image_path")
+                    if img_path and os.path.exists(img_path):
+                        try:
+                            img = Image.open(img_path)
+                            contents.append(img)
+                            images_attached += 1
+                        except Exception as e:
+                            print(f"⚠️ Warning loading chart image ({img_path}): {e}")
+
+                config = types.GenerateContentConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                    system_instruction=self.SYSTEM_INSTRUCTION
+                )
+
+                response = self.gemini_client.models.generate_content(
+                    model=self.GEMINI_MODEL,
+                    contents=contents,
+                    config=config
+                )
+                raw_answer = response.text
+                used_model = f"gemini/{self.GEMINI_MODEL}"
+            except Exception as e:
+                evidence = self.fallback.direct_evidence_fallback(query, retrieved_chunks)
+                err_msg = f"⚠️ Gemini API Call Failed ({e}). Falling back to direct filing extract:\n\n" + evidence
+                return {
+                    "answer": self.guardrails.validate_and_format_output(err_msg),
+                    "model": "api-error-fallback",
+                    "groundedness": {"passed": True, "score": 1.0},
+                    "fallback_triggered": True,
+                    "fallback_type": "API_ERROR_FALLBACK",
+                    "sources": retrieved_chunks
+                }
 
         # 3. Groundedness Evaluation Guardrail
         groundedness_check = self.guardrails.validate_groundedness(raw_answer, source_texts, query=query)
 
         if not groundedness_check["passed"]:
-            # Hallucination detected: Reject answer and fallback
             rejection_text = (
                 "🛡️ **Groundedness Guardrail Violation:**\n"
                 f"The generated answer included unverified figures {groundedness_check['unverified_entities']} "
@@ -164,7 +271,7 @@ STRICT OPERATING PRINCIPLES:
             )
             return {
                 "answer": self.guardrails.validate_and_format_output(rejection_text),
-                "model": self.MODEL_NAME,
+                "model": used_model,
                 "groundedness": groundedness_check,
                 "fallback_triggered": True,
                 "fallback_type": "GROUNDEDNESS_GUARDRAIL_REJECTION",
@@ -176,7 +283,7 @@ STRICT OPERATING PRINCIPLES:
 
         return {
             "answer": final_answer,
-            "model": self.MODEL_NAME,
+            "model": used_model,
             "images_attached": images_attached,
             "groundedness": groundedness_check,
             "fallback_triggered": False,
@@ -185,49 +292,5 @@ STRICT OPERATING PRINCIPLES:
         }
 
 
-def run_interactive_generator():
-    from retriever import FinancialMultiModalRerankRetriever
-
-    retriever = FinancialMultiModalRerankRetriever()
-    generator = GeminiFinancialGenerator()
-
-    print("\n" + "=" * 70)
-    print("🤖 Financial Multi-Modal RAG (Google Gemini 2.0 Flash + BGE-Reranker-v2-m3)")
-    print("Type your financial query below (or 'exit' to quit).")
-    print("=" * 70 + "\n")
-
-    while True:
-        try:
-            query = input("❓ Ask a Financial Question: ").strip()
-            if not query:
-                continue
-            if query.lower() in ["exit", "quit"]:
-                print("👋 Exiting generator. Goodbye!")
-                break
-
-            # 1. Input Guardrail
-            input_check = generator.guardrails.validate_input(query)
-            if not input_check["passed"]:
-                print(f"\n🛡️ Guardrail Block: {input_check['reason']}\n")
-                continue
-
-            print("\n⏳ Retrieving and Re-ranking verified SEC data...")
-            chunks = retriever.retrieve_and_rerank(query=query, top_k=3)
-
-            print("⚡ Generating answer with Google Gemini 2.0 Flash...\n")
-            result = generator.generate(query=query, retrieved_chunks=chunks)
-
-            print("=" * 70)
-            print(result["answer"])
-            print("=" * 70)
-            print(f"📊 Model: {result['model']} | Groundedness: {result['groundedness']['groundedness_score']} | Fallback: {result['fallback_triggered']}\n")
-
-        except KeyboardInterrupt:
-            print("\n👋 Terminated.")
-            break
-        except Exception as e:
-            print(f"❌ Error: {e}\n")
-
-
-if __name__ == "__main__":
-    run_interactive_generator()
+# Backwards compatibility alias so existing scripts do not break
+GeminiFinancialGenerator = UniversalFinancialGenerator

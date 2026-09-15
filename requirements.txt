@@ -2,6 +2,7 @@ streamlit
 fastapi
 uvicorn
 google-genai
+mistralai
 qdrant-client
 langchain
 langchain-community
