@@ -1,4 +1,6 @@
 streamlit
+fastapi
+uvicorn
 google-genai
 qdrant-client
 langchain
