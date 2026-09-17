@@ -48,8 +48,9 @@ class FinancialMultiModalRerankRetriever:
         )
 
         # 2. Stage 2 Cross-Encoder Re-Ranker
-        print(f"2️⃣ Loading Neural Cross-Encoder Re-Ranker: {reranker_model}...")
-        self.reranker = CrossEncoder(reranker_model, max_length=1024)
+        max_len = int(os.getenv("RERANKER_MAX_LENGTH", 512))
+        print(f"2️⃣ Loading Neural Cross-Encoder Re-Ranker: {reranker_model} (max_length={max_len})...")
+        self.reranker = CrossEncoder(reranker_model, max_length=max_len)
 
         # 3. Connect to Qdrant Cloud
         print(f"3️⃣ Connecting to Qdrant Cloud Collection: '{QDRANT_COLLECTION}'...")

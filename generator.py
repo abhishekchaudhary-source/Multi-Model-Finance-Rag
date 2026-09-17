@@ -224,19 +224,24 @@ STRICT OPERATING PRINCIPLES:
 
             try:
                 contents = [prompt_text]
+                attached_paths = set()
                 for chunk in retrieved_chunks:
                     img_path = chunk.get("image_path")
-                    if img_path and os.path.exists(img_path):
+                    if img_path and os.path.exists(img_path) and img_path not in attached_paths:
+                        if images_attached >= 1:  # Attach top 1 primary visual chart to minimize payload & latency
+                            break
                         try:
                             img = Image.open(img_path)
+                            img.thumbnail((1024, 1024))  # Downscale to reduce network latency
                             contents.append(img)
+                            attached_paths.add(img_path)
                             images_attached += 1
                         except Exception as e:
                             print(f"⚠️ Warning loading chart image ({img_path}): {e}")
 
                 config = types.GenerateContentConfig(
                     temperature=temperature,
-                    max_output_tokens=max_tokens,
+                    max_output_tokens=min(max_tokens, 750),
                     system_instruction=self.SYSTEM_INSTRUCTION
                 )
 
